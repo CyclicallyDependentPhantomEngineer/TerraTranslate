@@ -1,5 +1,31 @@
 # terra-translate — Full Audit: 31 Issues, Ranked
 
+> **Status: this is a historical audit, not a description of the current code.**
+>
+> It was written against an earlier version and is kept because the reasoning
+> behind each issue is still worth reading. Everything below is in the present
+> tense, but several Tier 1 and Tier 2 issues have since been fixed. The table
+> immediately below records what was re-checked against the code, and when.
+>
+> Verified 2026-08-02:
+>
+> | Issue | Claim | Status now |
+> |---|---|---|
+> | F1 | `translateResource()` returns exactly one target, so 1:N is impossible | **Fixed.** It returns `[]*ir.TargetResource`, and `ResourceMapping.Expand` drives fan-out — see `expandAWSSGToGCPFirewall` and `expandAWSDBToGCPSQL` in `internal/translator/mappings.go`. |
+> | F2 | The reference graph is never rewritten | **Fixed.** `translator.Translate` builds an `ir.RefGraph` in pass 1 and applies `rewriteRefs` in pass 2; `internal/ir/types_test.go` covers the rewriting rules. |
+> | F3 | Accuracy measures coverage, not correctness | **Partly addressed.** `TranslationScore` now carries separate coverage, validity, and semantic ratios, combined as `0.40/0.35/0.25`. The CLI's `-min-accuracy` gate is still coverage-only, which is documented in `README.md`. |
+> | F4 | The PID loop cannot exceed what the mapping tables provide | **Still true by design.** The loop tunes fuzzy-matching effort; it cannot invent a mapping that does not exist. Catalog-generated candidates widen the table, they do not remove the ceiling. |
+> | B1 | `Property.Mapped` mutation corrupts the feedback loop | **Fixed.** Mapping counts accumulate in a per-run `ResourceAccuracy` value; no `Property.Mapped` mutation remains. |
+> | B2 | Nested block codegen only handles two levels | **Fixed.** `buildBlockTree`/`writeBlockTree` in `internal/codegen/generator.go` recurse to arbitrary depth. |
+> | B3 | `required_providers` emits malformed HCL | **Fixed.** Every test in `internal/codegen/generator_test.go` re-parses the generated file with `hclparse` and fails if it is not valid HCL. |
+> | B4 | `evalExpr` with a nil context silently drops expressions | **Behaviour changed.** Expressions that cannot be evaluated statically now become explicit `TODO: ... requires manual translation` markers rather than disappearing. They are still not translated. |
+> | B5 | `hclwrite.Tokens` written with a zero-value `Type` field | **Still present, no observed effect.** Raw tokens are still constructed this way, and generated output is verified parseable by both the codegen tests and `terraform fmt -check` in CI. |
+>
+> The **Tier 3 semantic gaps (S1–S8) all still apply.** They are properties of
+> the clouds, not defects in this code, and they are the reason generated
+> configuration is a review artifact rather than something to apply. The Tier 4
+> PID observations remain accurate descriptions of the control design.
+
 ---
 
 ## TIER 1: Fatal Design Flaws (the tool produces wrong output)

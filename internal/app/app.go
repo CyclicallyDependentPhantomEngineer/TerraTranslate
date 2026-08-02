@@ -23,6 +23,7 @@ type Config struct {
 	From        string
 	To          string
 	SchemaPath  string
+	CatalogDir  string
 	Kp          float64
 	Ki          float64
 	Kd          float64
@@ -43,9 +44,6 @@ type Outcome struct {
 
 // ExitCode returns the documented process status for this outcome.
 func (o *Outcome) ExitCode(minAccuracy float64) int {
-	if minAccuracy <= 0 {
-		minAccuracy = 0.90
-	}
 	if o.Loop.Accuracy < minAccuracy {
 		return 2
 	}
@@ -55,6 +53,9 @@ func (o *Outcome) ExitCode(minAccuracy float64) int {
 // Translate runs parse -> classify -> translate/PID -> codegen for one module.
 func Translate(cfg Config) (*Outcome, error) {
 	setDefaults(&cfg)
+	if cfg.MinAccuracy < 0 || cfg.MinAccuracy > 1 {
+		return nil, fmt.Errorf("minimum accuracy must be between 0 and 1")
+	}
 
 	p := parser.New()
 	module, err := p.ParsePath(cfg.InputPath)
@@ -78,7 +79,7 @@ func Translate(cfg Config) (*Outcome, error) {
 	}
 	module.SourceProvider = from
 
-	mappings, err := translator.LoadMappings(from, to, cfg.SchemaPath)
+	mappings, err := translator.LoadMappingsWithCatalog(from, to, cfg.SchemaPath, cfg.CatalogDir)
 	if err != nil {
 		return nil, fmt.Errorf("load mappings: %w", err)
 	}
@@ -132,20 +133,8 @@ func setDefaults(cfg *Config) {
 	if cfg.To == "" {
 		cfg.To = "google"
 	}
-	if cfg.Kp == 0 {
-		cfg.Kp = 0.8
-	}
-	if cfg.Ki == 0 {
-		cfg.Ki = 0.1
-	}
-	if cfg.Kd == 0 {
-		cfg.Kd = 0.05
-	}
 	if cfg.MaxIter <= 0 {
 		cfg.MaxIter = 8
-	}
-	if cfg.MinAccuracy <= 0 {
-		cfg.MinAccuracy = 0.90
 	}
 }
 

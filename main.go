@@ -1,160 +1,384 @@
-// terra-translate translates Terraform modules between cloud providers using an
-// Intermediate Representation (IR) and a PID-controlled feedback loop to
-// maximise attribute mapping accuracy.
-//
-// Usage:
-//
-//	terra-translate -from aws -to google -input ./my-aws-module -output ./gcp-output
-//	terra-translate -from aws -to azurerm -input main.tf -output ./azure-output -v
-//	terra-translate -from google -to aws -input ./gcp -output ./aws-out -kp 0.9 -ki 0.2
+// terra-translate translates Terraform modules between cloud providers and
+// provides adapters for Terraform CLI and Terragrunt repositories.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 
-	"github.com/terra-translate/internal/codegen"
-	"github.com/terra-translate/internal/feedback"
-	"github.com/terra-translate/internal/parser"
-	"github.com/terra-translate/internal/pid"
-	"github.com/terra-translate/internal/translator"
+	"github.com/terra-translate/internal/app"
+	"github.com/terra-translate/internal/catalog"
+	terraformext "github.com/terra-translate/internal/integration/terraform"
+	terragruntext "github.com/terra-translate/internal/integration/terragrunt"
 )
 
 func main() {
-	var (
-		inputPath  = flag.String("input", ".", "Input Terraform file or directory")
-		outputDir  = flag.String("output", "./terra-translate-output", "Output directory")
-		from       = flag.String("from", "aws", "Source cloud provider (aws, google, azurerm)")
-		to         = flag.String("to", "google", "Target cloud provider (aws, google, azurerm)")
-		schemaPath = flag.String("schema", "", "Optional path to 'terraform providers schema -json' output")
-		kp         = flag.Float64("kp", 0.8, "PID proportional gain")
-		ki         = flag.Float64("ki", 0.1, "PID integral gain")
-		kd         = flag.Float64("kd", 0.05, "PID derivative gain")
-		maxIter    = flag.Int("max-iter", 8, "Maximum PID feedback iterations")
-		verbose    = flag.Bool("v", false, "Verbose output (show per-iteration PID data)")
-		printPID   = flag.Bool("pid-report", false, "Print full PID history table after translation")
-	)
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `terra-translate — Terraform module cloud translator with PID feedback
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		// Backward compatibility with the original flag-only CLI.
+		return runTerraform(args, false, stdout, stderr)
+	}
+
+	switch args[0] {
+	case "terraform", "translate":
+		return runTerraform(args[1:], true, stdout, stderr)
+	case "terragrunt":
+		return runTerragrunt(args[1:], stdout, stderr)
+	case "catalog":
+		return runCatalog(args[1:], stdout, stderr)
+	case "help", "-help", "--help":
+		printRootUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printRootUsage(stderr)
+		return 1
+	}
+}
+
+func printRootUsage(w io.Writer) {
+	fmt.Fprint(w, `terra-translate — cross-cloud Terraform and Terragrunt migration assistant
 
 Usage:
-  terra-translate [flags]
+  terra-translate terraform [flags]   Translate one Terraform module
+  terra-translate terragrunt [flags]  Translate local modules used by Terragrunt units
+  terra-translate catalog refresh     Refresh provider/module data and mappings
+  terra-translate catalog remap       Regenerate mappings from stored indexes
+  terra-translate catalog status      Show the current catalog snapshot
+  terra-translate [flags]             Legacy alias for "terraform"
 
-Flags:
+Run "terra-translate <command> -help" for command-specific flags.
 `)
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, `
-Examples:
-  terra-translate -from aws -to google -input ./aws-infra -output ./gcp-infra
-  terra-translate -from aws -to azurerm -input main.tf -output ./azure -v -pid-report
-  terra-translate -from google -to aws -input ./gcp -output ./aws -kp 0.9 -ki 0.2 -kd 0.1
-`)
-	}
-	flag.Parse()
+}
 
-	log.SetFlags(0)
-	log.SetPrefix("[terra-translate] ")
-
-	fmt.Printf("\n╔══════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  terra-translate  %-8s → %-8s                    ║\n", *from, *to)
-	fmt.Printf("║  PID: Kp=%-5.2f Ki=%-5.2f Kd=%-5.2f  MaxIter=%-3d         ║\n",
-		*kp, *ki, *kd, *maxIter)
-	fmt.Printf("╚══════════════════════════════════════════════════════════╝\n\n")
-
-	// 1. Parse source Terraform files.
-	log.Printf("Parsing source: %s", *inputPath)
-	p := parser.New()
-	module, err := p.ParsePath(*inputPath)
-	if err != nil {
-		log.Fatalf("Parse error: %v", err)
-	}
-	module.SourceProvider = *from
-	log.Printf("Found %d resource(s), %d variable(s), %d output(s), %d data source(s)",
-		len(module.Resources), len(module.Variables), len(module.Outputs), len(module.DataSources))
-
-	if len(module.Resources) == 0 {
-		log.Fatal("No resources found — nothing to translate.")
+func runTerraform(args []string, extensionMode bool, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("terraform", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	defaultFrom := "aws"
+	if extensionMode {
+		defaultFrom = "auto"
 	}
 
-	// 2. Load mapping tables.
-	log.Printf("Loading mappings: %s → %s", *from, *to)
-	mappings, err := translator.LoadMappings(*from, *to, *schemaPath)
-	if err != nil {
-		log.Fatalf("Failed to load mappings: %v", err)
+	inputPath := flags.String("input", ".", "Input Terraform file or module directory")
+	outputDir := flags.String("output", "./terra-translate-output", "Output directory")
+	from := flags.String("from", defaultFrom, "Source provider (auto, aws, google, azurerm)")
+	to := flags.String("to", "google", "Target provider (aws, google, azurerm)")
+	schemaPath := flags.String("schema", "", "Optional provider schema JSON path")
+	catalogDir := flags.String("catalog", "", "Refreshed catalog directory used for generated mappings")
+	kp := flags.Float64("kp", 0.8, "PID proportional gain")
+	ki := flags.Float64("ki", 0.1, "PID integral gain")
+	kd := flags.Float64("kd", 0.05, "PID derivative gain")
+	maxIter := flags.Int("max-iter", 8, "Maximum feedback iterations")
+	minAccuracy := flags.Float64("min-accuracy", 0.90, "Minimum mapped-attribute ratio for exit code 0")
+	verbose := flags.Bool("v", false, "Show per-iteration PID data")
+	printPID := flags.Bool("pid-report", false, "Print the full PID history")
+	terraformBinary := flags.String("terraform-bin", "terraform", "Terraform CLI binary used for checks")
+	fmtCheck := flags.Bool("fmt-check", extensionMode, "Run terraform fmt -check on generated HCL")
+	validate := flags.Bool("validate", false, "Run terraform validate (output must already be initialized)")
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: terra-translate terraform [flags]")
+		flags.PrintDefaults()
 	}
-
-	// 3. PID controller + feedback loop.
-	ctrl := pid.New(*kp, *ki, *kd, 1.0)
-	trans := translator.New(mappings)
-	loop := feedback.NewLoop(ctrl, trans, *maxIter, *verbose)
-
-	log.Printf("Starting PID feedback loop (max %d iterations)…", *maxIter)
-	loopResult, err := loop.Run(module)
-	if err != nil {
-		log.Fatalf("Translation failed: %v", err)
-	}
-
-	// 4. Report.
-	fmt.Printf("\n┌─ Results ────────────────────────────────────────────────\n")
-	fmt.Printf("│  Iterations : %d", loopResult.Iterations)
-	if loopResult.Converged {
-		fmt.Printf(" (converged ✓)\n")
-	} else {
-		fmt.Printf(" (max reached)\n")
-	}
-	fmt.Printf("│  Accuracy   : %.1f%% (%d / %d attributes mapped)\n",
-		loopResult.Accuracy*100, loopResult.MappedAttrs, loopResult.TotalAttrs)
-	fmt.Printf("│  Accuracy Δ : %s\n", sparkline(loopResult.AccuracyHistory))
-
-	for _, ra := range loopResult.BestResult.ResourceAccuracies {
-		status := "✓"
-		if ra.Score < 1.0 {
-			status = "~"
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
 		}
-		fmt.Printf("│    %s %-40s  %.0f%%\n", status,
-			ra.OriginalType+"."+ra.Name, ra.Score*100)
+		return 1
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "unexpected positional arguments: %s\n", strings.Join(flags.Args(), " "))
+		return 1
 	}
 
-	if len(loopResult.Warnings) > 0 {
-		fmt.Printf("│  Warnings (%d):\n", len(loopResult.Warnings))
-		for _, w := range loopResult.Warnings {
-			fmt.Printf("│    ⚠  [%s] %s — %s\n", w.Resource, w.Attribute, w.Message)
+	fmt.Fprintf(stdout, "terra-translate: Terraform module %s -> %s\n", *from, *to)
+	fmt.Fprintf(stdout, "Parsing source: %s\n", *inputPath)
+	outcome, err := app.Translate(app.Config{
+		InputPath:   *inputPath,
+		OutputDir:   *outputDir,
+		From:        *from,
+		To:          *to,
+		SchemaPath:  *schemaPath,
+		CatalogDir:  *catalogDir,
+		Kp:          *kp,
+		Ki:          *ki,
+		Kd:          *kd,
+		MaxIter:     *maxIter,
+		Verbose:     *verbose,
+		MinAccuracy: *minAccuracy,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "translation failed: %v\n", err)
+		return 1
+	}
+
+	if err := terraformext.VerifySyntax(outcome.HCLPath); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	checks := terraformext.RunChecks(*terraformBinary, *outputDir, outcome.HCLPath, *fmtCheck, *validate)
+	for _, check := range checks {
+		if check.Err != nil {
+			fmt.Fprintf(stderr, "check failed: %s: %v\n", check.Name, check.Err)
+			if check.Output != "" {
+				fmt.Fprintln(stderr, check.Output)
+			}
+			return 1
 		}
+		fmt.Fprintf(stdout, "Check passed: %s\n", check.Name)
 	}
-	fmt.Printf("└──────────────────────────────────────────────────────────\n\n")
 
+	printTranslationResult(stdout, outcome)
 	if *printPID {
-		fmt.Println(ctrl.Report())
+		fmt.Fprintln(stdout, outcome.Controller.Report())
+	}
+	fmt.Fprintf(stdout, "Translated HCL: %s\n", outcome.HCLPath)
+	fmt.Fprintf(stdout, "Translation report: %s\n", outcome.ReportPath)
+
+	status := outcome.ExitCode(*minAccuracy)
+	if status == 2 {
+		fmt.Fprintf(stderr, "translation coverage %.1f%% is below the %.1f%% threshold; manual review is required\n",
+			outcome.Loop.Accuracy*100, *minAccuracy*100)
+	}
+	return status
+}
+
+func runTerragrunt(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("terragrunt", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	root := flags.String("root", ".", "Terragrunt repository or stack root")
+	outputRoot := flags.String("output", "./terra-translate-terragrunt-output", "Stack translation output directory")
+	from := flags.String("from", "auto", "Source provider (auto, aws, google, azurerm)")
+	to := flags.String("to", "google", "Target provider (aws, google, azurerm)")
+	schemaPath := flags.String("schema", "", "Optional provider schema JSON path")
+	catalogDir := flags.String("catalog", "", "Refreshed catalog directory used for generated mappings")
+	kp := flags.Float64("kp", 0.8, "PID proportional gain")
+	ki := flags.Float64("ki", 0.1, "PID integral gain")
+	kd := flags.Float64("kd", 0.05, "PID derivative gain")
+	maxIter := flags.Int("max-iter", 8, "Maximum feedback iterations per module")
+	minAccuracy := flags.Float64("min-accuracy", 0.90, "Minimum mapped-attribute ratio")
+	verbose := flags.Bool("v", false, "Show per-iteration PID data")
+	failOnSkipped := flags.Bool("fail-on-skipped", true, "Return exit code 2 when remote or dynamic units are skipped")
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: terra-translate terragrunt [flags]")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "unexpected positional arguments: %s\n", strings.Join(flags.Args(), " "))
+		return 1
 	}
 
-	// 5. Write output.
-	if err := os.MkdirAll(*outputDir, 0755); err != nil {
-		log.Fatalf("Cannot create output dir %q: %v", *outputDir, err)
+	fmt.Fprintf(stdout, "terra-translate: Terragrunt stack %s -> %s\n", *from, *to)
+	report, reportPath, err := terragruntext.TranslateStack(terragruntext.StackConfig{
+		Root:          *root,
+		OutputRoot:    *outputRoot,
+		From:          *from,
+		To:            *to,
+		SchemaPath:    *schemaPath,
+		CatalogDir:    *catalogDir,
+		Kp:            *kp,
+		Ki:            *ki,
+		Kd:            *kd,
+		MaxIter:       *maxIter,
+		Verbose:       *verbose,
+		MinAccuracy:   *minAccuracy,
+		FailOnSkipped: *failOnSkipped,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "Terragrunt translation failed: %v\n", err)
+		return 1
 	}
 
-	hclPath := filepath.Join(*outputDir, "main.tf")
-	gen := codegen.New(*to)
-	if err := gen.WriteHCL(hclPath, loopResult.BestResult); err != nil {
-		log.Fatalf("Failed to write HCL: %v", err)
+	for _, unit := range report.Units {
+		configPath, _ := filepath.Rel(report.Root, unit.ConfigPath)
+		fmt.Fprintf(stdout, "  %-10s %-40s", unit.Status, configPath)
+		if unit.TotalAttrs > 0 {
+			fmt.Fprintf(stdout, " %.1f%% (%d/%d)", unit.AccuracyPercent, unit.MappedAttrs, unit.TotalAttrs)
+		}
+		if unit.Error != "" {
+			fmt.Fprintf(stdout, " — %s", unit.Error)
+		}
+		fmt.Fprintln(stdout)
 	}
-	log.Printf("Translated HCL written to: %s", hclPath)
+	summary := report.Summary
+	fmt.Fprintf(stdout, "Units: %d; unique modules: %d; translated: %d; partial: %d; skipped: %d; failed: %d\n",
+		summary.Units, summary.UniqueModules, summary.TranslatedModules, summary.PartialModules, summary.SkippedUnits, summary.FailedUnits)
+	fmt.Fprintf(stdout, "Stack report: %s\n", reportPath)
+	return report.ExitCode(*failOnSkipped)
+}
 
-	reportPath := filepath.Join(*outputDir, "translation_report.json")
-	if err := feedback.WriteReport(reportPath, loopResult, ctrl, *from, *to); err != nil {
-		log.Printf("Warning: could not write report: %v", err)
-	} else {
-		log.Printf("PID report written to:       %s", reportPath)
+func runCatalog(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "Usage: terra-translate catalog <refresh|remap|status> [flags]")
+		return 1
+	}
+	switch args[0] {
+	case "refresh":
+		return runCatalogRefresh(args[1:], stdout, stderr)
+	case "remap":
+		return runCatalogRemap(args[1:], stdout, stderr)
+	case "status":
+		return runCatalogStatus(args[1:], stdout, stderr)
+	case "help", "-help", "--help":
+		fmt.Fprintln(stdout, "Usage: terra-translate catalog <refresh|remap|status> [flags]")
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown catalog command %q\n", args[0])
+		return 1
+	}
+}
+
+func runCatalogRemap(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("catalog remap", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	catalogDir := flags.String("catalog", "./catalog", "Catalog directory")
+	overridesPath := flags.String("overrides", "./catalog-overrides.json", "Manual mapping override JSON file")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	manifest, manifestPath, err := catalog.Remap(*catalogDir, *overridesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "catalog remap failed: %v\n", err)
+		return 1
+	}
+	printCatalogSummary(stdout, manifest)
+	fmt.Fprintf(stdout, "Manifest: %s\n", manifestPath)
+	return 0
+}
+
+func runCatalogRefresh(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("catalog refresh", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	outputDir := flags.String("output", "./catalog", "Versioned catalog directory")
+	terraformBinary := flags.String("terraform-bin", "terraform", "Terraform CLI binary")
+	registryURL := flags.String("registry-url", "https://registry.terraform.io", "Terraform Registry base URL")
+	awsVersion := flags.String("aws-version", "latest", "AWS provider version or latest")
+	googleVersion := flags.String("google-version", "latest", "Google provider version or latest")
+	azurermVersion := flags.String("azurerm-version", "latest", "AzureRM provider version or latest")
+	refreshModules := flags.Bool("modules", true, "Fetch paginated Registry module metadata")
+	moduleLimit := flags.Int("module-limit", 0, "Maximum modules per provider; 0 fetches all")
+	moduleDetails := flags.Bool("module-details", false, "Fetch detailed inputs/outputs/resources for each selected module")
+	detailWorkers := flags.Int("detail-workers", 6, "Concurrent Registry module-detail requests")
+	detailRPS := flags.Int("detail-rps", 10, "Maximum Registry module-detail requests started per second")
+	requestTimeout := flags.Duration("request-timeout", 45*time.Second, "Timeout for each Registry request")
+	commandTimeout := flags.Duration("command-timeout", 20*time.Minute, "Timeout for Terraform init and schema extraction")
+	overridesPath := flags.String("overrides", "./catalog-overrides.json", "Manual mapping override JSON file")
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: terra-translate catalog refresh [flags]")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if *moduleLimit < 0 {
+		fmt.Fprintln(stderr, "module-limit cannot be negative")
+		return 1
+	}
+	if *detailRPS <= 0 {
+		fmt.Fprintln(stderr, "detail-rps must be positive")
+		return 1
 	}
 
-	if loopResult.Accuracy < 0.90 {
-		fmt.Printf("\n⚠  Translation accuracy %.1f%% is below 90%%. Review unmapped attributes manually.\n",
-			loopResult.Accuracy*100)
-		os.Exit(2)
+	manifest, manifestPath, err := catalog.Refresh(catalog.Config{
+		OutputDir:       *outputDir,
+		TerraformBinary: *terraformBinary,
+		RegistryBaseURL: *registryURL,
+		Providers: []catalog.ProviderSpec{
+			{Name: "aws", Source: "hashicorp/aws", Version: *awsVersion},
+			{Name: "google", Source: "hashicorp/google", Version: *googleVersion},
+			{Name: "azurerm", Source: "hashicorp/azurerm", Version: *azurermVersion},
+		},
+		RefreshModules: *refreshModules,
+		ModuleLimit:    *moduleLimit,
+		ModuleDetails:  *moduleDetails,
+		DetailWorkers:  *detailWorkers,
+		DetailRPS:      *detailRPS,
+		RequestTimeout: *requestTimeout,
+		CommandTimeout: *commandTimeout,
+		OverridesPath:  *overridesPath,
+		Progress: func(format string, values ...interface{}) {
+			fmt.Fprintf(stdout, format+"\n", values...)
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "catalog refresh failed: %v\n", err)
+		return 1
 	}
-	fmt.Println("\n✓ Translation complete.")
+	printCatalogSummary(stdout, manifest)
+	fmt.Fprintf(stdout, "Manifest: %s\n", manifestPath)
+	return 0
+}
+
+func runCatalogStatus(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("catalog status", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	catalogDir := flags.String("catalog", "./catalog", "Catalog directory")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	manifest, err := catalog.LoadLatest(*catalogDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "catalog status failed: %v\n", err)
+		return 1
+	}
+	printCatalogSummary(stdout, manifest)
+	return 0
+}
+
+func printCatalogSummary(w io.Writer, manifest *catalog.Manifest) {
+	fmt.Fprintf(w, "Catalog snapshot: %s (%s)\n", manifest.SnapshotID, manifest.RefreshedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "Terraform: %s\n", manifest.TerraformVersion)
+	providerNames := make([]string, 0, len(manifest.Providers))
+	for name := range manifest.Providers {
+		providerNames = append(providerNames, name)
+	}
+	slices.Sort(providerNames)
+	for _, name := range providerNames {
+		provider := manifest.Providers[name]
+		modules := manifest.Modules[name]
+		fmt.Fprintf(w, "  %-8s v%-12s resources=%d data_sources=%d ephemeral=%d functions=%d modules=%d detailed=%d\n",
+			name, provider.Version, provider.Resources, provider.DataSources,
+			provider.EphemeralResources, provider.Functions, modules.Modules, modules.Detailed)
+	}
+	fmt.Fprintf(w, "Generated mappings: %d provider pairs\n", len(manifest.Mappings))
+}
+
+func printTranslationResult(w io.Writer, outcome *app.Outcome) {
+	result := outcome.Loop
+	convergence := "stalled/max iterations"
+	if result.Converged {
+		convergence = "converged"
+	}
+	fmt.Fprintf(w, "Result: %.1f%% coverage (%d/%d attributes), %d iterations, %s\n",
+		result.Accuracy*100, result.MappedAttrs, result.TotalAttrs, result.Iterations, convergence)
+	fmt.Fprintf(w, "Accuracy trend: %s\n", sparkline(result.AccuracyHistory))
+	if len(result.Warnings) > 0 {
+		fmt.Fprintf(w, "Warnings: %d\n", len(result.Warnings))
+	}
 }
 
 func sparkline(history []float64) string {
@@ -162,13 +386,16 @@ func sparkline(history []float64) string {
 	if len(history) == 0 {
 		return "—"
 	}
-	var sb string
-	for _, v := range history {
-		idx := int(v * float64(len(blocks)-1))
-		if idx >= len(blocks) {
-			idx = len(blocks) - 1
+	var builder strings.Builder
+	for _, value := range history {
+		index := int(value * float64(len(blocks)-1))
+		if index < 0 {
+			index = 0
 		}
-		sb += blocks[idx]
+		if index >= len(blocks) {
+			index = len(blocks) - 1
+		}
+		builder.WriteString(blocks[index])
 	}
-	return sb
+	return builder.String()
 }

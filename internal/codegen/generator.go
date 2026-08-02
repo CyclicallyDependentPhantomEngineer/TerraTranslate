@@ -130,6 +130,17 @@ terraform {
 	})
 }
 
+// originalType names the source resource a target was translated from. Every
+// mapping sets OriginalResource, but the field is only used for comments, so a
+// missing one degrades the annotation instead of panicking mid-generation and
+// losing an entire module's output.
+func originalType(tr *ir.TargetResource) string {
+	if tr.OriginalResource == nil {
+		return "unknown"
+	}
+	return tr.OriginalResource.OriginalType
+}
+
 func (g *Generator) writeResource(root *hclwrite.Body, tr *ir.TargetResource) {
 	if strings.HasPrefix(tr.ProviderType, "#") {
 		root.AppendUnstructuredTokens(hclwrite.Tokens{
@@ -139,7 +150,7 @@ func (g *Generator) writeResource(root *hclwrite.Body, tr *ir.TargetResource) {
 					"# ║ %s\n"+
 					"# ║ Attributes: %s\n"+
 					"# ╚════════════════════════════════════════════════════════════\n",
-				tr.OriginalResource.OriginalType, tr.Name,
+				originalType(tr), tr.Name,
 				tr.Comment,
 				strings.Join(tr.UnmappedAttrs, ", "),
 			))},
@@ -148,7 +159,7 @@ func (g *Generator) writeResource(root *hclwrite.Body, tr *ir.TargetResource) {
 	}
 
 	comment := fmt.Sprintf("\n# Translated from: %s.%s",
-		tr.OriginalResource.OriginalType, tr.Name)
+		originalType(tr), tr.Name)
 	if tr.Comment != "" {
 		comment += "\n# " + tr.Comment
 	}
@@ -180,7 +191,10 @@ func (g *Generator) writeResource(root *hclwrite.Body, tr *ir.TargetResource) {
 	writeBlockTree(body, tree, tr.TodoAttrs, "")
 
 	// Lifecycle.
-	meta := tr.OriginalResource.Meta
+	var meta ir.ResourceMeta
+	if tr.OriginalResource != nil {
+		meta = tr.OriginalResource.Meta
+	}
 	if meta.PreventDestroy || meta.CreateBeforeDestroy {
 		body.AppendNewline()
 		lc := body.AppendNewBlock("lifecycle", nil)
