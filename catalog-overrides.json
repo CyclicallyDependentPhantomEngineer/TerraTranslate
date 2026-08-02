@@ -1,0 +1,177 @@
+{
+  "resources": [
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_instance",
+      "target_type": "google_compute_instance",
+      "attributes": {
+        "instance_type": "machine_type",
+        "tags": "labels",
+        "subnet_id": "network_interface.subnetwork",
+        "user_data": "metadata_startup_script",
+        "availability_zone": "zone"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_s3_bucket",
+      "target_type": "google_storage_bucket",
+      "attributes": {
+        "bucket": "name",
+        "tags": "labels",
+        "force_destroy": "force_destroy"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_vpc",
+      "target_type": "google_compute_network"
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_subnet",
+      "target_type": "google_compute_subnetwork",
+      "attributes": {
+        "cidr_block": "ip_cidr_range",
+        "vpc_id": "network",
+        "availability_zone": "region"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_security_group",
+      "target_type": "google_compute_firewall",
+      "attributes": {
+        "name": "name",
+        "description": "description",
+        "vpc_id": "network"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_db_instance",
+      "target_type": "google_sql_database_instance"
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "google",
+      "source_type": "aws_lambda_function",
+      "target_type": "google_cloudfunctions2_function"
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "azurerm",
+      "source_type": "aws_instance",
+      "target_type": "azurerm_linux_virtual_machine",
+      "attributes": {
+        "instance_type": "size",
+        "tags": "tags",
+        "user_data": "custom_data"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "azurerm",
+      "source_type": "aws_s3_bucket",
+      "target_type": "azurerm_storage_account",
+      "attributes": {
+        "bucket": "name",
+        "tags": "tags"
+      }
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "azurerm",
+      "source_type": "aws_vpc",
+      "target_type": "azurerm_virtual_network"
+    },
+    {
+      "source_provider": "aws",
+      "target_provider": "azurerm",
+      "source_type": "aws_security_group",
+      "target_type": "azurerm_network_security_group"
+    },
+    {
+      "source_provider": "google",
+      "target_provider": "aws",
+      "source_type": "google_compute_instance",
+      "target_type": "aws_instance",
+      "attributes": {
+        "machine_type": "instance_type",
+        "labels": "tags",
+        "zone": "availability_zone"
+      }
+    },
+    {
+      "source_provider": "google",
+      "target_provider": "aws",
+      "source_type": "google_storage_bucket",
+      "target_type": "aws_s3_bucket",
+      "attributes": {
+        "name": "bucket",
+        "labels": "tags",
+        "force_destroy": "force_destroy"
+      }
+    },
+    {
+      "source_provider": "google",
+      "target_provider": "azurerm",
+      "source_type": "google_compute_instance",
+      "target_type": "azurerm_linux_virtual_machine"
+    },
+    {
+      "source_provider": "google",
+      "target_provider": "azurerm",
+      "source_type": "google_storage_bucket",
+      "target_type": "azurerm_storage_account"
+    },
+    {
+      "source_provider": "google",
+      "target_provider": "azurerm",
+      "source_type": "google_compute_network",
+      "target_type": "azurerm_virtual_network"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "aws",
+      "source_type": "azurerm_linux_virtual_machine",
+      "target_type": "aws_instance"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "aws",
+      "source_type": "azurerm_storage_account",
+      "target_type": "aws_s3_bucket"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "aws",
+      "source_type": "azurerm_virtual_network",
+      "target_type": "aws_vpc"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "google",
+      "source_type": "azurerm_linux_virtual_machine",
+      "target_type": "google_compute_instance"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "google",
+      "source_type": "azurerm_storage_account",
+      "target_type": "google_storage_bucket"
+    },
+    {
+      "source_provider": "azurerm",
+      "target_provider": "google",
+      "source_type": "azurerm_virtual_network",
+      "target_type": "google_compute_network"
+    }
+  ]
+}

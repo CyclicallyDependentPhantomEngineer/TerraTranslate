@@ -1,0 +1,197 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The workflow only reads the repository; nothing here needs write access.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.21 is the version declared in go.mod and the floor documented in
+        # setup.md; "stable" catches breakage on current Go.
+        go: ["1.21", "stable"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^catalog/' || true)"
+          if [ -n "${unformatted}" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  docs-are-executable:
+    # Every command in this job is copied from README.md, setup.md or
+    # example/README.md. If a documented command stops working, or stops
+    # producing the documented files and exit codes, this job fails.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+
+      - name: Build
+        run: |
+          mkdir -p bin
+          go build -trimpath -o ./bin/terra-translate .
+
+      - name: setup.md section 3 — the committed catalog loads
+        run: ./bin/terra-translate catalog status -catalog ./catalog
+
+      - name: setup.md section 4 — first module translation exits 0
+        run: |
+          ./bin/terra-translate terraform \
+            -input ./example/terragrunt/modules/storage \
+            -output /tmp/first-module \
+            -from auto -to google \
+            -catalog ./catalog \
+            -min-accuracy 0.5
+          test -f /tmp/first-module/main.tf
+          test -f /tmp/first-module/translation_report.json
+
+      - name: example/README.md — realistic module reports partial coverage
+        run: |
+          ./bin/terra-translate terraform \
+            -input ./example/realtime/aws-web-platform \
+            -output /tmp/realtime-google \
+            -from aws -to google \
+            -catalog ./catalog \
+            -min-accuracy 0
+          test -f /tmp/realtime-google/main.tf
+
+      - name: README.md — Terragrunt stack layout matches the documented tree
+        run: |
+          ./bin/terra-translate terragrunt \
+            -root ./example/terragrunt \
+            -output /tmp/tg-stack \
+            -to google \
+            -catalog ./catalog \
+            -min-accuracy 0.5
+          test -f /tmp/tg-stack/terragrunt_translation_report.json
+          test -f /tmp/tg-stack/modules/storage/main.tf
+          test -f /tmp/tg-stack/modules/storage/translation_report.json
+
+      - name: README.md — exit code 2 means partial translation
+        run: |
+          set +e
+          ./bin/terra-translate terraform \
+            -input ./example/realtime/aws-web-platform \
+            -output /tmp/partial \
+            -from aws -to google \
+            -catalog ./catalog
+          code=$?
+          set -e
+          if [ "${code}" -ne 2 ]; then
+            echo "expected exit code 2 for coverage below -min-accuracy, got ${code}"
+            exit 1
+          fi
+
+      - name: README.md — an unsupported pair fails instead of emitting stubs
+        run: |
+          set +e
+          output="$(./bin/terra-translate terraform \
+            -input ./example/terragrunt/modules/storage \
+            -output /tmp/unsupported \
+            -from google -to azurerm \
+            -min-accuracy 0 2>&1)"
+          code=$?
+          set -e
+          if [ "${code}" -ne 1 ]; then
+            echo "expected exit code 1 for an unsupported pair, got ${code}"
+            exit 1
+          fi
+          echo "${output}" | grep -q "is not supported"
+
+      - name: README.md — the legacy flag-only invocation still works
+        run: |
+          ./bin/terra-translate \
+            -from aws -to google \
+            -input ./example/terragrunt/modules/storage \
+            -output /tmp/legacy \
+            -min-accuracy 0.5
+          test -f /tmp/legacy/main.tf
+
+  repo-hygiene:
+    # Guards the properties that make this repository safe to push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: No file exceeds GitHub's 100 MB hard limit
+        run: |
+          oversized="$(find . -type f -size +99M -not -path './.git/*')"
+          if [ -n "${oversized}" ]; then
+            echo "These files exceed GitHub's per-file limit:"
+            echo "${oversized}"
+            exit 1
+          fi
+
+      - name: No compiled binary or Terraform state is tracked
+        run: |
+          if git ls-files | grep -E '(^|/)(bin/|terraform\.tfstate|\.terraform/)' ; then
+            echo "build output or Terraform state is tracked"
+            exit 1
+          fi
+
+      - name: No credential-shaped strings outside the generated catalog
+        run: |
+          if git ls-files -z \
+            | grep -zv '^catalog/' \
+            | xargs -0 grep -nIE '(AKIA|ASIA)[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|xox[baprs]-' ; then
+            echo "possible credential committed"
+            exit 1
+          fi

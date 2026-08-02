@@ -69,7 +69,7 @@ func (t *Translator) Translate(module *ir.Module, effort float64) *Result {
 		totalValid += accuracy.Valid
 
 		// Register in reference graph (primary target only).
-		if len(targets) > 0 && targets[0].IsPrimary {
+		if len(targets) > 0 && targets[0].IsPrimary && !strings.HasPrefix(targets[0].ProviderType, "#") {
 			result.RefGraph.Register(
 				res.OriginalType, res.Name,
 				targets[0].ProviderType, targets[0].Name,
@@ -155,6 +155,14 @@ func (t *Translator) translateResource(res *ir.Resource, effort float64) ([]*ir.
 			acc.Mapped += len(tr.Attributes) + len(tr.NestedBlocks)
 			acc.Valid += len(tr.Attributes) + len(tr.NestedBlocks)
 		}
+		// Fan-out can create more target attributes than existed on the source
+		// resource. Coverage is a source-attribute ratio and must never exceed 1.
+		if acc.Mapped > acc.Total {
+			acc.Mapped = acc.Total
+		}
+		if acc.Valid > acc.Mapped {
+			acc.Valid = acc.Mapped
+		}
 		if acc.Total > 0 {
 			acc.Score = float64(acc.Mapped) / float64(acc.Total)
 		}
@@ -170,6 +178,9 @@ func (t *Translator) translateResource(res *ir.Resource, effort float64) ([]*ir.
 		NestedBlocks:     make(map[string]interface{}),
 		TodoAttrs:        make(map[string]string),
 		IsPrimary:        true,
+	}
+	if rm.Generated {
+		target.Comment = "Catalog-generated resource mapping; verify provider semantics"
 	}
 
 	attrIndex := make(map[string]AttrMapping, len(rm.AttrMaps))
@@ -198,6 +209,9 @@ func (t *Translator) translateResource(res *ir.Resource, effort float64) ([]*ir.
 				acc.Valid++
 			} else {
 				target.TodoAttrs[am.TargetAttr] = "value may be invalid in target provider"
+			}
+			if am.Generated {
+				target.TodoAttrs[am.TargetAttr] = "catalog-generated mapping; verify value and semantics"
 			}
 			mapped = true
 		}
@@ -275,13 +289,13 @@ func (t *Translator) fuzzyMatchScored(srcKey string, rm ResourceMapping, maxDist
 	bestAttr := ""
 	bestDist := maxDist + 1
 
-	for _, am := range rm.AttrMaps {
-		tgtParts := strings.Split(am.TargetAttr, ".")
+	for _, candidate := range targetCandidates(rm) {
+		tgtParts := strings.Split(candidate, ".")
 		tgtLeaf := strings.ToLower(tgtParts[len(tgtParts)-1])
 		dist := levenshtein(srcLower, tgtLeaf)
 		if dist < bestDist {
 			bestDist = dist
-			bestAttr = am.TargetAttr
+			bestAttr = candidate
 		}
 	}
 
@@ -292,11 +306,11 @@ func (t *Translator) fuzzyMatchScored(srcKey string, rm ResourceMapping, maxDist
 		"region": "location", "location": "region",
 	}
 	if syn, ok := synonyms[srcLower]; ok {
-		for _, am := range rm.AttrMaps {
-			tgtParts := strings.Split(am.TargetAttr, ".")
+		for _, candidate := range targetCandidates(rm) {
+			tgtParts := strings.Split(candidate, ".")
 			tgtLeaf := strings.ToLower(tgtParts[len(tgtParts)-1])
 			if tgtLeaf == syn {
-				return am.TargetAttr, 0, true
+				return candidate, 0, true
 			}
 		}
 	}
@@ -305,6 +319,24 @@ func (t *Translator) fuzzyMatchScored(srcKey string, rm ResourceMapping, maxDist
 		return bestAttr, bestDist, true
 	}
 	return "", 0, false
+}
+
+func targetCandidates(rm ResourceMapping) []string {
+	seen := make(map[string]struct{}, len(rm.AttrMaps)+len(rm.TargetAttrs))
+	candidates := make([]string, 0, len(rm.AttrMaps)+len(rm.TargetAttrs))
+	for _, mapping := range rm.AttrMaps {
+		if _, exists := seen[mapping.TargetAttr]; !exists {
+			seen[mapping.TargetAttr] = struct{}{}
+			candidates = append(candidates, mapping.TargetAttr)
+		}
+	}
+	for _, attribute := range rm.TargetAttrs {
+		if _, exists := seen[attribute]; !exists {
+			seen[attribute] = struct{}{}
+			candidates = append(candidates, attribute)
+		}
+	}
+	return candidates
 }
 
 func levenshtein(a, b string) int {
@@ -468,22 +500,22 @@ func (t *Translator) LearnFromMissed(missed []UnmappedAttr, effort float64) {
 			continue
 		}
 		srcBare := normaliseName(m.SourceAttr)
-		for _, am := range rm.AttrMaps {
-			if normaliseName(am.TargetAttr) == srcBare {
-				t.learnedMappings[learnKey] = am.TargetAttr
+		for _, candidate := range targetCandidates(rm) {
+			if normaliseName(candidate) == srcBare {
+				t.learnedMappings[learnKey] = candidate
 				break
 			}
 		}
 		if _, found := t.learnedMappings[learnKey]; !found {
 			bestDist := maxDist + 1
 			bestAttr := ""
-			for _, am := range rm.AttrMaps {
-				parts := strings.Split(am.TargetAttr, ".")
+			for _, candidate := range targetCandidates(rm) {
+				parts := strings.Split(candidate, ".")
 				leaf := parts[len(parts)-1]
 				dist := levenshtein(strings.ToLower(m.SourceAttr), strings.ToLower(leaf))
 				if dist < bestDist {
 					bestDist = dist
-					bestAttr = am.TargetAttr
+					bestAttr = candidate
 				}
 			}
 			if bestDist <= maxDist {

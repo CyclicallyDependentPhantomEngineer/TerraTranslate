@@ -15,6 +15,7 @@ type AttrMapping struct {
 	IRKey      string
 	Transform  func(interface{}) interface{} // nil means pass-through
 	Required   bool
+	Generated  bool // catalog-derived mapping; always requires manual review
 }
 
 // ResourceMapping describes the full translation between equivalent resource
@@ -24,7 +25,12 @@ type ResourceMapping struct {
 	TargetType   string
 	LogicalClass ir.ResourceClass
 	AttrMaps     []AttrMapping
-	Expand       func(*ir.Resource) []*ir.TargetResource // optional 1:N
+	// TargetAttrs contains additional target-side candidates loaded from a
+	// Terraform provider schema. They are used only for fuzzy matches and are
+	// always emitted with a manual-review TODO.
+	TargetAttrs []string
+	Expand      func(*ir.Resource) []*ir.TargetResource // optional 1:N
+	Generated   bool
 }
 
 // CloudMappings is the full mapping table between two providers.
@@ -36,21 +42,39 @@ type CloudMappings struct {
 
 // LoadMappings returns the mapping table for a source → target pair.
 func LoadMappings(source, target, schemaPath string) (*CloudMappings, error) {
+	return LoadMappingsWithCatalog(source, target, schemaPath, "")
+}
+
+// LoadMappingsWithCatalog combines curated mappings, optional live provider
+// schema attributes, and generated mappings from a refreshed catalog.
+func LoadMappingsWithCatalog(source, target, schemaPath, catalogDir string) (*CloudMappings, error) {
 	key := source + "->" + target
+	var mappings *CloudMappings
 	switch key {
 	case "aws->google", "aws->gcp":
-		return awsToGCPMappings(), nil
+		mappings = awsToGCPMappings()
 	case "aws->azurerm", "aws->azure":
-		return awsToAzureMappings(), nil
+		mappings = awsToAzureMappings()
 	case "google->aws", "gcp->aws":
-		return gcpToAWSMappings(), nil
+		mappings = gcpToAWSMappings()
 	default:
-		return &CloudMappings{
+		mappings = &CloudMappings{
 			SourceProvider: source,
 			TargetProvider: target,
 			Resources:      make(map[string]ResourceMapping),
-		}, nil
+		}
 	}
+	if schemaPath != "" {
+		if err := augmentMappingsFromSchema(mappings, schemaPath); err != nil {
+			return nil, err
+		}
+	}
+	if catalogDir != "" {
+		if err := augmentMappingsFromCatalog(mappings, catalogDir); err != nil {
+			return nil, err
+		}
+	}
+	return mappings, nil
 }
 
 // ── AWS → GCP ────────────────────────────────────────────────────────────────

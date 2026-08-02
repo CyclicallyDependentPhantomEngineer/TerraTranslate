@@ -281,13 +281,13 @@ func evalExpr(expr hclsyntax.Expression) interface{} {
 	case *hclsyntax.RelativeTraversalExpr:
 		return traversalToRef(e.Traversal)
 	case *hclsyntax.ConditionalExpr:
-		return "${conditional}"
+		return "TODO: conditional expression requires manual translation"
 	case *hclsyntax.FunctionCallExpr:
-		return fmt.Sprintf("${%s(...)}", e.Name)
+		return fmt.Sprintf("TODO: %s function requires manual translation", e.Name)
 	default:
 		val, diags := expr.Value(nil)
 		if diags.HasErrors() || val == cty.NilVal || !val.IsKnown() {
-			return "${unknown_expr}"
+			return "TODO: dynamic expression requires manual translation"
 		}
 		return ctyToGo(val)
 	}
