@@ -1,0 +1,69 @@
+{
+  "format_version": "1.0",
+  "snapshot_id": "20260830T091453.385004616Z",
+  "refreshed_at": "2026-08-30T09:14:53.385004616Z",
+  "terraform_version": "Terraform v1.16.0",
+  "providers": {
+    "aws": {
+      "source": "hashicorp/aws",
+      "version": "6.62.0",
+      "schema_format_version": "1.0",
+      "raw_schema_file": "snapshots/20260830T091453.385004616Z/providers/aws/schema.json.gz",
+      "index_file": "snapshots/20260830T091453.385004616Z/providers/aws/index.json.gz",
+      "resources": 1711,
+      "data_sources": 679,
+      "ephemeral_resources": 10,
+      "functions": 4
+    },
+    "azurerm": {
+      "source": "hashicorp/azurerm",
+      "version": "5.3.0",
+      "schema_format_version": "1.0",
+      "raw_schema_file": "snapshots/20260830T091453.385004616Z/providers/azurerm/schema.json.gz",
+      "index_file": "snapshots/20260830T091453.385004616Z/providers/azurerm/index.json.gz",
+      "resources": 1104,
+      "data_sources": 395,
+      "ephemeral_resources": 2,
+      "functions": 2
+    },
+    "google": {
+      "source": "hashicorp/google",
+      "version": "8.0.0",
+      "schema_format_version": "1.0",
+      "raw_schema_file": "snapshots/20260830T091453.385004616Z/providers/google/schema.json.gz",
+      "index_file": "snapshots/20260830T091453.385004616Z/providers/google/index.json.gz",
+      "resources": 1330,
+      "data_sources": 459,
+      "ephemeral_resources": 6,
+      "functions": 6
+    }
+  },
+  "modules": {
+    "aws": {
+      "file": "snapshots/20260830T091453.385004616Z/modules/aws.json.gz",
+      "modules": 11277,
+      "detailed": 11277,
+      "registry_query": "https://registry.terraform.io/v1/modules?provider=aws"
+    },
+    "azurerm": {
+      "file": "snapshots/20260830T091453.385004616Z/modules/azurerm.json.gz",
+      "modules": 3421,
+      "detailed": 3421,
+      "registry_query": "https://registry.terraform.io/v1/modules?provider=azurerm"
+    },
+    "google": {
+      "file": "snapshots/20260830T091453.385004616Z/modules/google.json.gz",
+      "modules": 1389,
+      "detailed": 1389,
+      "registry_query": "https://registry.terraform.io/v1/modules?provider=google"
+    }
+  },
+  "mappings": {
+    "aws-to-azurerm": "snapshots/20260830T091453.385004616Z/mappings/aws-to-azurerm.json.gz",
+    "aws-to-google": "snapshots/20260830T091453.385004616Z/mappings/aws-to-google.json.gz",
+    "azurerm-to-aws": "snapshots/20260830T091453.385004616Z/mappings/azurerm-to-aws.json.gz",
+    "azurerm-to-google": "snapshots/20260830T091453.385004616Z/mappings/azurerm-to-google.json.gz",
+    "google-to-aws": "snapshots/20260830T091453.385004616Z/mappings/google-to-aws.json.gz",
+    "google-to-azurerm": "snapshots/20260830T091453.385004616Z/mappings/google-to-azurerm.json.gz"
+  }
+}
